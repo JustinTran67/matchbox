@@ -1,0 +1,22 @@
+include(FetchContent)
+
+FetchContent_Declare(
+  Catch2
+  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+  GIT_TAG v3.8.1
+  GIT_SHALLOW ON
+)
+FetchContent_MakeAvailable(Catch2)
+
+add_executable(matchbox_tests
+  test_order_book.cpp
+  test_matching.cpp
+  test_stress.cpp
+)
+
+target_link_libraries(matchbox_tests PRIVATE matchbox_core Catch2::Catch2WithMain)
+target_compile_options(matchbox_tests PRIVATE -Wall -Wextra)
+
+list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+include(Catch)
+catch_discover_tests(matchbox_tests)
