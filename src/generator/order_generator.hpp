@@ -5,6 +5,7 @@
 #include <random>
 #include <vector>
 
+#include "generator/order_id_source.hpp"
 #include "orderbook/order_book.hpp"
 #include "orderbook/types.hpp"
 
@@ -40,6 +41,12 @@ class OrderGenerator {
   };
 
   OrderGenerator(const GeneratorConfig& config, std::uint64_t seed);
+  // Draws ids from a source shared with other trader populations on the same symbol.
+  OrderGenerator(const GeneratorConfig& config, std::uint64_t seed, OrderIdSource& ids);
+
+  // ids_ may point at owned_ids_, so copying or moving would leave it dangling.
+  OrderGenerator(const OrderGenerator&) = delete;
+  OrderGenerator& operator=(const OrderGenerator&) = delete;
 
   Action next(const OrderBook& book);
 
@@ -54,7 +61,8 @@ class OrderGenerator {
   GeneratorConfig config_;
   std::mt19937_64 rng_;
   Price reference_price_;
-  OrderId next_order_id_{1};
+  OrderIdSource owned_ids_;
+  OrderIdSource* ids_;
   std::vector<OrderId> working_orders_;
 };
 

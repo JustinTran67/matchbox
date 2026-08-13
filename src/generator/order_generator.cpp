@@ -14,7 +14,11 @@ Price ticks_from(double value) { return static_cast<Price>(std::llround(value));
 }  // namespace
 
 OrderGenerator::OrderGenerator(const GeneratorConfig& config, std::uint64_t seed)
-    : config_(config), rng_(seed), reference_price_(config.reference_price) {}
+    : config_(config), rng_(seed), reference_price_(config.reference_price), ids_(&owned_ids_) {}
+
+OrderGenerator::OrderGenerator(const GeneratorConfig& config, std::uint64_t seed,
+                               OrderIdSource& ids)
+    : config_(config), rng_(seed), reference_price_(config.reference_price), ids_(&ids) {}
 
 OrderGenerator::Action OrderGenerator::next(const OrderBook& book) {
   if (std::bernoulli_distribution(config_.cancel_probability)(rng_)) {
@@ -41,7 +45,7 @@ Order OrderGenerator::generate_order(const OrderBook& book) {
       std::max(config_.min_price, reference_price_ + ticks_from(drift(rng_)));
 
   Order order;
-  order.id = next_order_id_++;
+  order.id = ids_->take();
   order.side = std::bernoulli_distribution(0.5)(rng_) ? Side::Buy : Side::Sell;
   order.quantity =
       std::uniform_int_distribution<Quantity>(config_.min_quantity, config_.max_quantity)(rng_);

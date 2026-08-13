@@ -13,9 +13,10 @@ add_executable(matchbox_tests
   test_matching.cpp
   test_stress.cpp
   test_pro_rata.cpp
+  test_multi_symbol.cpp
 )
 
-target_link_libraries(matchbox_tests PRIVATE matchbox_core Catch2::Catch2WithMain)
+target_link_libraries(matchbox_tests PRIVATE matchbox_sim Threads::Threads Catch2::Catch2WithMain)
 target_include_directories(matchbox_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(matchbox_tests PRIVATE -Wall -Wextra)
 

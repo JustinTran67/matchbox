@@ -11,6 +11,16 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
+find_package(Threads REQUIRED)
+
+# ThreadSanitizer must instrument every target in the build, so this has to be set before
+# any of them are declared. Kept as a separate build directory rather than a default.
+option(MATCHBOX_TSAN "Build with ThreadSanitizer" OFF)
+if(MATCHBOX_TSAN)
+  add_compile_options(-fsanitize=thread -g -O1)
+  add_link_options(-fsanitize=thread)
+endif()
+
 add_library(matchbox_core
   src/build_info.cpp
   src/orderbook/price_level.cpp
@@ -19,6 +29,8 @@ add_library(matchbox_core
   src/matching/pro_rata_matcher.cpp
   src/matching/engine.cpp
   src/generator/order_generator.cpp
+  src/generator/informed_trader.cpp
+  src/generator/market_simulator.cpp
 )
 
 target_include_directories(matchbox_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -33,5 +45,6 @@ if(MATCHBOX_ENABLE_ASSERTS)
 endif()
 
 enable_testing()
+add_subdirectory(sim)
 add_subdirectory(tests)
 add_subdirectory(bench)

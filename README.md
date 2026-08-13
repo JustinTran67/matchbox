@@ -3,10 +3,10 @@
 A simulated stock exchange: the matching engine itself — order book, order types, and the
 matching rules that decide who trades with whom at what price.
 
-Phases 1 and 2 are complete: a single-threaded, single-symbol engine with limit/market/
-cancel order types, two interchangeable matching algorithms (price-time priority and
-pro-rata), a synthetic order-flow generator, a correctness suite, and a benchmark harness
-with measured results. Multi-symbol support and realistic trader models are Phase 3.
+Phases 1-3 are complete: an engine with limit/market/cancel order types, two
+interchangeable matching algorithms (price-time priority and pro-rata), informed and noise
+trader populations, a correctness suite, a benchmark harness, and a concurrent
+multi-symbol simulation - all with measured results. Containerisation is Phase 4.
 
 ## Build and test
 
@@ -59,11 +59,31 @@ crossing the far touch, and only then is any remainder allowed to rest.
 sum to the submitted quantity. That makes order conservation checkable from outside the
 engine, which the stress tests rely on.
 
-**Order flow.** Passive orders are posted away from a slowly drifting reference price — bids
-below, asks above — so they rest and build depth, as the large majority of real order flow
-does. Liquidity is taken by explicitly aggressive orders, by market orders, and by drift
-carrying the reference through already-resting orders. Phase 3 replaces this with informed
-and noise traders.
+**Order flow.** Noise traders post passively away from a slowly drifting reference price —
+bids below, asks above — so they rest and build depth, as the large majority of real order
+flow does. Liquidity is taken by explicitly aggressive orders, by market orders, and by
+drift carrying the reference through already-resting orders.
+
+**Informed traders.** An informed trader sees a fundamental the market cannot: a random
+walk, separate from the noise traders' own reference price, which is their uninformed
+guess rather than the truth. When the book's mid drifts off the fundamental, the informed
+trader posts on the correcting side, anchored on the touch it would have to cross and
+reaching `correction_aggression` of the way from there to the fundamental. So it crosses
+only when the fundamental is already through that touch, and even then stops short rather
+than sweeping the book.
+
+Two details matter more than they look. The fundamental advances exactly once per
+simulation step whether or not the informed trader acts that step — otherwise a run with
+fewer informed traders would also get a slower-moving fundamental, and comparisons across
+informed ratios would be meaningless. And the informed trader draws the fundamental's walk
+from a *different* RNG stream than its order sizes and sides: sharing one stream would make
+the fundamental's path depend on how often the trader was asked to quote, reintroducing
+the same bias through the back door. A test asserts both populations reach an identical
+fundamental after the same number of steps.
+
+Both populations on a symbol draw order ids from one shared `OrderIdSource`, because an id
+is the engine's identity for an order and two populations counting independently would
+hand the book duplicates.
 
 ## Testing
 
@@ -96,6 +116,34 @@ the level total — are each caught by both the hand-written cases and the rando
 The sixth, removing the per-order cap in the remainder pass, changes nothing observable:
 that guard is unreachable given floor division, by the argument in the Design section. It
 is kept because it stops being unreachable the moment the rounding changes.
+
+Concurrency is checked by determinism rather than by absence of crashes. One symbol is run
+alone, and its full trade sequence plus the exact book it leaves behind are recorded. The
+same symbol is then replayed on four threads at once alongside four unrelated symbols, and
+every replica must match the solo run exactly. A shared counter, a shared RNG, or any other
+hidden global would perturb that symbol depending on what ran beside it, and this is what
+would catch it. The concurrent tests are also run clean under ThreadSanitizer:
+
+```sh
+cmake -B build-tsan -DMATCHBOX_TSAN=ON
+cmake --build build-tsan
+./build-tsan/tests/matchbox_tests "a symbol's outcome*" "an informed trader*" \
+    "the fundamental advances*" "order ids stay*"
+```
+
+That run initially reported 33 races — all of them inside Catch2's assertion machinery,
+because the trace helper called `REQUIRE` from worker threads and Catch2's assertion
+handling is not thread-safe. The helper now records a consistency flag and the main thread
+asserts on it after `join()`. No race was ever found in the engine or simulator themselves.
+
+Four defects were injected into the informed trader. Inverting the correction direction and
+ignoring `correction_aggression` are both caught by the statistical test and the unit
+tests. Anchoring on the near touch instead of the far touch and freezing the fundamental are
+caught only by unit tests — and the first of those is worth being precise about: measured,
+it tracks the fundamental *better* (|px−true| of 5.4 vs 10.6), so it is not a correctness
+bug at all but a gentler correction that still satisfies the property under test. Writing a
+statistical test to reject it would be testing a design preference, not correctness, so the
+exact-price unit test pins the intended anchoring instead.
 
 Assertions are kept live in optimised builds, since they encode the engine's internal
 preconditions. Benchmark builds should configure with `-DMATCHBOX_ENABLE_ASSERTS=OFF` so
@@ -157,14 +205,70 @@ aggressive orders off the touch and draws cancel targets from resting orders. Th
 engines therefore diverge slightly as they run, but the effect is small: cancel hit counts
 were 68,273 vs 68,256 under the default flow and identical at 135 under the aggressive one.
 
+## Multi-symbol simulation
+
+```sh
+cmake -B build
+cmake --build build
+./build/sim/matchbox_sim_driver
+```
+
+Twelve symbols run concurrently, one thread each, 200k steps per symbol, at three informed
+ratios. Seeds are fixed, so the whole run is bit-reproducible.
+
+| informed | spread | sd | resting orders | \|px−true\| | sd | passive posts/1k | crossing/1k |
+|---|---|---|---|---|---|---|---|
+| 0.00 | 11.46 | 2.94 | 8,566 | 120.12 | 46.35 | 533.4 | 342.8 |
+| 0.20 | 12.02 | 3.39 | 6,169 | 86.94 | 56.78 | 499.4 | 420.3 |
+| 0.50 | 21.72 | 12.94 | 5,948 | 26.24 | 17.05 | 581.9 | 507.8 |
+
+`sd` is the spread of per-symbol means across the twelve symbols, not within a run.
+
+**Price discovery works, and it is the unambiguous result.** Mean |trade price − fundamental|
+falls from 120.1 to 26.2, a 4.6× improvement, while the dispersion across symbols falls too
+(46.4 to 17.1). With no informed traders the book follows the noise traders' own reference
+walk, which is independent of the fundamental, so the two drift apart roughly as √steps —
+the absolute number at 0.00 is therefore a function of run length and only the comparison
+across ratios is meaningful.
+
+**Depth falls and spread widens — and the obvious explanation is wrong.** The natural
+suspicion is a confound: raising the informed ratio replaces noise actions with informed
+ones, so perhaps the book thins simply because less passive liquidity is being posted. The
+measurement says no. Passive posts per 1,000 steps are 533 → 499 → **582**, flat to slightly
+*rising*, because informed orders that fail to cross rest near the touch. Meanwhile crossing
+submissions climb monotonically, 343 → 508 per 1,000. So liquidity supply holds up while
+consumption rises: resting depth falls 8,566 → 5,948 because informed flow is picking off
+resting orders, which is adverse selection rather than a supply artefact.
+
+**The spread result is directionally consistent but statistically weak, and should not be
+quoted as a headline.** The mean rises 11.46 → 21.72, but the per-symbol standard deviation
+rises far faster, 2.94 → 12.94. With twelve symbols the standard error at the top ratio is
+about 3.7, so the gap is roughly 2.7 standard errors — suggestive, not settled. The honest
+finding is that informed flow makes the touch both wider *and* dramatically more variable
+across symbols; the increase in dispersion is the more robust of the two effects.
+
+**Why thread-per-symbol.** Each thread owns one `MarketSimulator`, one `Engine`, and one
+exclusive results slot. Nothing is shared: no queue, no lock, no global RNG, no shared id
+counter. There is no synchronisation in the hot path because there is nothing to
+synchronise — the only happens-before edge in the whole run is `join()`.
+
+That is a deliberate rehearsal for Phase 4 rather than scaffolding to throw away. A symbol
+already has no reachable path to another symbol's state, which is exactly the precondition
+for running each one as its own process or container; the step from thread to container
+changes deployment, not the code's ownership model. It is also why `Order` still carries no
+symbol field and there is no routing layer: partitioning order flow by symbol is Kafka's job
+in Phase 4, and building a dispatcher now would be replaced by it. The determinism test is
+what proves the isolation is real rather than assumed.
+
 ## Layout
 
 ```
 src/orderbook/   price levels, FIFO queues, the book and its order-id index
 src/matching/    MatchingStrategy interface, price-time and pro-rata matchers, engine
-src/generator/   synthetic order flow
+src/generator/   noise and informed trader flow, market simulator, shared id source
 tests/           correctness and randomised stress tests, shared independent book model
 bench/           latency/throughput harness
+sim/             concurrent multi-symbol simulation and market-quality stats
 ```
 
 ## License
