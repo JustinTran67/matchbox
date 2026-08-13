@@ -12,9 +12,11 @@ add_executable(matchbox_tests
   test_order_book.cpp
   test_matching.cpp
   test_stress.cpp
+  test_pro_rata.cpp
 )
 
 target_link_libraries(matchbox_tests PRIVATE matchbox_core Catch2::Catch2WithMain)
+target_include_directories(matchbox_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(matchbox_tests PRIVATE -Wall -Wextra)
 
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)

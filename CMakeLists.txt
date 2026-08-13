@@ -12,9 +12,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 add_library(matchbox_core
+  src/build_info.cpp
   src/orderbook/price_level.cpp
   src/orderbook/order_book.cpp
   src/matching/fifo_matcher.cpp
+  src/matching/pro_rata_matcher.cpp
   src/matching/engine.cpp
   src/generator/order_generator.cpp
 )
@@ -32,3 +34,4 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(bench)
