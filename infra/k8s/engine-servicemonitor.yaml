@@ -1,0 +1,21 @@
+# Tells the Prometheus Operator (installed by kube-prometheus-stack) to scrape the engine
+# pods. The `release: monitoring` label is what the stack's default Prometheus instance
+# selects on - without it the ServiceMonitor is created but silently never picked up.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: matchbox-engine
+  labels:
+    app: matchbox-engine
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: matchbox-engine
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 5s
+  namespaceSelector:
+    matchNames:
+      - default

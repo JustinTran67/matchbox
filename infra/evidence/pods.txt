@@ -1,0 +1,11 @@
+NAME                 READY   STATUS      RESTARTS        AGE     IP           NODE                         NOMINATED NODE   READINESS GATES
+kafka-0              1/1     Running     0               29m     10.0.2.33    ip-10-0-2-232.ec2.internal   <none>           <none>
+kafka-topics-tzpqw   0/1     Completed   0               28m     10.0.1.176   ip-10-0-1-83.ec2.internal    <none>           <none>
+matchbox-e2e         0/1     Completed   0               26m     10.0.1.176   ip-10-0-1-83.ec2.internal    <none>           <none>
+matchbox-engine-0    1/1     Running     2 (6m37s ago)   28m     10.0.1.9     ip-10-0-1-83.ec2.internal    <none>           <none>
+matchbox-engine-1    1/1     Running     1 (26m ago)     28m     10.0.1.53    ip-10-0-1-83.ec2.internal    <none>           <none>
+matchbox-engine-2    1/1     Running     2 (6m37s ago)   28m     10.0.2.72    ip-10-0-2-232.ec2.internal   <none>           <none>
+matchbox-engine-3    1/1     Running     1 (26m ago)     28m     10.0.2.5     ip-10-0-2-232.ec2.internal   <none>           <none>
+matchbox-load-1      0/1     Error       0               26m     10.0.1.213   ip-10-0-1-83.ec2.internal    <none>           <none>
+matchbox-load-2      0/1     Error       0               16m     10.0.1.176   ip-10-0-1-83.ec2.internal    <none>           <none>
+matchbox-load-3      0/1     Error       0               6m43s   10.0.1.176   ip-10-0-1-83.ec2.internal    <none>           <none>

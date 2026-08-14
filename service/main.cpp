@@ -72,7 +72,8 @@ int main() {
   std::fflush(stdout);
 
   EngineService service(config);
-  HealthServer health(env_int("HEALTH_PORT", 8080), [&service] { return service.ready(); });
+  HealthServer health(env_int("HEALTH_PORT", 8080), [&service] { return service.ready(); },
+                      [&service] { return service.metrics_text(); });
   if (!health.start()) {
     std::fprintf(stderr, "health server failed to bind\n");
     return 1;

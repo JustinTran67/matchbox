@@ -15,6 +15,7 @@ add_executable(matchbox_tests
   test_pro_rata.cpp
   test_multi_symbol.cpp
   test_partitioning.cpp
+  test_metrics.cpp
 )
 
 target_link_libraries(matchbox_tests PRIVATE matchbox_sim matchbox_wire Threads::Threads Catch2::Catch2WithMain)

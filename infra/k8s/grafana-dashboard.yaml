@@ -1,0 +1,95 @@
+# Auto-loaded by the kube-prometheus-stack Grafana sidecar, which watches for ConfigMaps
+# carrying the grafana_dashboard label and drops their contents into Grafana's provisioning
+# directory. No manual import step, and the dashboard is version-controlled alongside the
+# code whose metrics it renders.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: matchbox-dashboard
+  labels:
+    grafana_dashboard: "1"
+data:
+  matchbox.json: |
+    {
+      "title": "matchbox engine",
+      "uid": "matchbox-engine",
+      "timezone": "browser",
+      "refresh": "5s",
+      "time": { "from": "now-15m", "to": "now" },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Orders consumed / sec (per pod)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "rate(matchbox_orders_consumed_total[1m])",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Trades published / sec (per pod)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "rate(matchbox_trades_published_total[1m])",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Submit latency p50 / p99 (all pods)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(matchbox_submit_latency_seconds_bucket[1m])) by (le))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(matchbox_submit_latency_seconds_bucket[1m])) by (le))",
+              "legendFormat": "p99",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Cancels / sec and malformed messages / sec",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum(rate(matchbox_cancels_total[1m]))",
+              "legendFormat": "cancels",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(matchbox_malformed_total[1m]))",
+              "legendFormat": "malformed",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Symbols owned (per pod)",
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 16 },
+          "targets": [
+            {
+              "expr": "matchbox_symbols_owned",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

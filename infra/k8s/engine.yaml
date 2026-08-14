@@ -20,6 +20,11 @@ spec:
     - name: health
       port: 8080
       targetPort: 8080
+    # Same listener as health, named separately so the ServiceMonitor can select it by
+    # name rather than by a bare port number.
+    - name: metrics
+      port: 9090
+      targetPort: 8080
 ---
 apiVersion: apps/v1
 kind: StatefulSet

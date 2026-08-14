@@ -5,3 +5,6 @@ build-service/
 compile_commands.json
 .cache/
 .DS_Store
+infra/terraform/.terraform/
+infra/terraform/*.tfstate*
+infra/evidence-*.txt

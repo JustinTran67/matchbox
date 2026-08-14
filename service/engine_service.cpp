@@ -2,6 +2,7 @@
 
 #include <librdkafka/rdkafkacpp.h>
 
+#include <chrono>
 #include <cstdio>
 #include <string_view>
 #include <utility>
@@ -37,6 +38,17 @@ DeliveryReport& delivery_report() {
 }  // namespace
 
 EngineService::EngineService(EngineServiceConfig config) : config_(std::move(config)) {}
+
+EngineServiceStats EngineService::stats() const {
+  EngineServiceStats snapshot;
+  snapshot.orders_consumed = counters_.orders_consumed.load(std::memory_order_relaxed);
+  snapshot.submits = counters_.submits.load(std::memory_order_relaxed);
+  snapshot.cancels = counters_.cancels.load(std::memory_order_relaxed);
+  snapshot.trades_published = counters_.trades_published.load(std::memory_order_relaxed);
+  snapshot.malformed = counters_.malformed.load(std::memory_order_relaxed);
+  snapshot.symbols = counters_.symbols.load(std::memory_order_relaxed);
+  return snapshot;
+}
 
 EngineService::~EngineService() { stop(); }
 
@@ -98,7 +110,7 @@ Engine& EngineService::engine_for(const std::string& symbol) {
   auto engine = std::make_unique<Engine>(std::make_unique<FifoMatcher>());
   Engine& reference = *engine;
   engines_.emplace(symbol, std::move(engine));
-  stats_.symbols = engines_.size();
+  counters_.symbols.store(engines_.size(), std::memory_order_relaxed);
   return reference;
 }
 
@@ -106,21 +118,24 @@ void EngineService::handle(const RdKafka::Message& message) {
   const std::string_view payload(static_cast<const char*>(message.payload()), message.len());
   const std::optional<OrderMessage> order = decode_order(payload);
   if (!order.has_value()) {
-    ++stats_.malformed;
+    counters_.malformed.fetch_add(1, std::memory_order_relaxed);
     return;
   }
 
-  ++stats_.orders_consumed;
+  counters_.orders_consumed.fetch_add(1, std::memory_order_relaxed);
   Engine& engine = engine_for(order->symbol);
 
   if (order->is_cancel) {
     engine.cancel(order->id);
-    ++stats_.cancels;
+    counters_.cancels.fetch_add(1, std::memory_order_relaxed);
     return;
   }
 
+  const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
   const ExecutionReport report = engine.submit(order->to_order());
-  ++stats_.submits;
+  const std::chrono::steady_clock::time_point finished = std::chrono::steady_clock::now();
+  latency_.observe(std::chrono::duration<double>(finished - started).count());
+  counters_.submits.fetch_add(1, std::memory_order_relaxed);
 
   for (const Trade& trade : report.trades) {
     TradeMessage published;
@@ -145,7 +160,7 @@ void EngineService::handle(const RdKafka::Message& message) {
       std::fprintf(stderr, "produce failed: %s\n", RdKafka::err2str(produced).c_str());
       continue;
     }
-    ++stats_.trades_published;
+    counters_.trades_published.fetch_add(1, std::memory_order_relaxed);
   }
 }
 

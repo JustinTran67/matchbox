@@ -1,0 +1,36 @@
+# HELP matchbox_orders_consumed_total Order messages consumed from the orders topic.
+# TYPE matchbox_orders_consumed_total counter
+matchbox_orders_consumed_total 10600
+# HELP matchbox_submits_total Submit actions applied to a book.
+# TYPE matchbox_submits_total counter
+matchbox_submits_total 9445
+# HELP matchbox_cancels_total Cancel actions applied to a book.
+# TYPE matchbox_cancels_total counter
+matchbox_cancels_total 1155
+# HELP matchbox_trades_published_total Trades published to the trades topic.
+# TYPE matchbox_trades_published_total counter
+matchbox_trades_published_total 7081
+# HELP matchbox_malformed_total Messages rejected as malformed before reaching a book.
+# TYPE matchbox_malformed_total counter
+matchbox_malformed_total 0
+# HELP matchbox_symbols_owned Distinct symbols with a book on this replica.
+# TYPE matchbox_symbols_owned gauge
+matchbox_symbols_owned 1
+# HELP matchbox_submit_latency_seconds Time spent matching one submitted order.
+# TYPE matchbox_submit_latency_seconds histogram
+matchbox_submit_latency_seconds_bucket{le="1e-06"} 9125
+matchbox_submit_latency_seconds_bucket{le="2.5e-06"} 9436
+matchbox_submit_latency_seconds_bucket{le="5e-06"} 9440
+matchbox_submit_latency_seconds_bucket{le="1e-05"} 9443
+matchbox_submit_latency_seconds_bucket{le="2.5e-05"} 9444
+matchbox_submit_latency_seconds_bucket{le="5e-05"} 9445
+matchbox_submit_latency_seconds_bucket{le="0.0001"} 9445
+matchbox_submit_latency_seconds_bucket{le="0.00025"} 9445
+matchbox_submit_latency_seconds_bucket{le="0.0005"} 9445
+matchbox_submit_latency_seconds_bucket{le="0.001"} 9445
+matchbox_submit_latency_seconds_bucket{le="0.005"} 9445
+matchbox_submit_latency_seconds_bucket{le="0.01"} 9445
+matchbox_submit_latency_seconds_bucket{le="+Inf"} 9445
+matchbox_submit_latency_seconds_sum 0.003161129
+matchbox_submit_latency_seconds_count 9445
+pod "mprobe2" deleted from default namespace

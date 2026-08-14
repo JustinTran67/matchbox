@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "matching/engine.hpp"
+#include "metrics.hpp"
 
 namespace RdKafka {
 class KafkaConsumer;
@@ -28,15 +29,6 @@ struct EngineServiceConfig {
   // Offsets are committed in batches, but never ahead of an acknowledged produce - see
   // commit_progress().
   std::size_t commit_interval{100};
-};
-
-struct EngineServiceStats {
-  std::size_t orders_consumed{0};
-  std::size_t submits{0};
-  std::size_t cancels{0};
-  std::size_t trades_published{0};
-  std::size_t malformed{0};
-  std::size_t symbols{0};
 };
 
 // Owns whole partitions of the orders topic and the books for every symbol on them.
@@ -59,7 +51,12 @@ class EngineService {
   void stop();
 
   bool ready() const { return ready_.load(); }
-  EngineServiceStats stats() const { return stats_; }
+
+  // Safe to call from another thread while run() is going: every counter is atomic, which
+  // is what makes a live /metrics scrape possible without locking the consume loop.
+  EngineServiceStats stats() const;
+  LatencySnapshot latency() const { return latency_.snapshot(); }
+  std::string metrics_text() const { return render_metrics(stats(), latency()); }
 
  private:
   // A book per symbol, not per partition: symbols are mapped onto partitions by hashing
@@ -69,12 +66,25 @@ class EngineService {
   void handle(const RdKafka::Message& message);
   bool commit_progress(std::string& error);
 
+  // Atomic rather than mutex-guarded: the scrape reads these while the consume loop is
+  // mutating them, and they are independent tallies, not a transaction that has to be
+  // observed as one consistent set.
+  struct Counters {
+    std::atomic<std::size_t> orders_consumed{0};
+    std::atomic<std::size_t> submits{0};
+    std::atomic<std::size_t> cancels{0};
+    std::atomic<std::size_t> trades_published{0};
+    std::atomic<std::size_t> malformed{0};
+    std::atomic<std::size_t> symbols{0};
+  };
+
   EngineServiceConfig config_;
   std::unique_ptr<RdKafka::KafkaConsumer> consumer_;
   std::unique_ptr<RdKafka::Producer> producer_;
   std::map<std::string, std::unique_ptr<Engine>> engines_;
   std::atomic<bool> ready_{false};
-  EngineServiceStats stats_;
+  Counters counters_;
+  LatencyHistogram latency_;
   std::size_t since_commit_{0};
 };
 

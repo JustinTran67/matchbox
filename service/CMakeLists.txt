@@ -3,6 +3,7 @@
 add_library(matchbox_wire
   partition_assignment.cpp
   wire.cpp
+  metrics.cpp
 )
 target_link_libraries(matchbox_wire PUBLIC matchbox_core nlohmann_json::nlohmann_json)
 target_include_directories(matchbox_wire PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

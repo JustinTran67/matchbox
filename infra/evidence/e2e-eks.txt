@@ -1,0 +1,20 @@
+matchbox end-to-end verification
+  brokers : kafka-0.kafka.default.svc.cluster.local:9092
+  steps   : 5000 per symbol across 4 symbols
+  AAPL   5000 orders -> 3034 expected trades
+  MSFT   5000 orders -> 2886 expected trades
+  AMZN   5000 orders -> 3120 expected trades
+  META   5000 orders -> 2566 expected trades
+published 20000 orders, expecting 11606 trades
+  received 5000/11606
+  received 10000/11606
+
+received 11606 trades (0 malformed)
+symbol     expected   observed   result
+--------------------------------------------------
+AAPL           3034       3034   MATCH
+MSFT           2886       2886   MATCH
+AMZN           3120       3120   MATCH
+META           2566       2566   MATCH
+
+PASS: cluster trades match in-process ground truth

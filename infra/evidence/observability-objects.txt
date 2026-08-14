@@ -1,0 +1,3 @@
+NAME                 DATA   AGE
+matchbox-dashboard   1      26m
+Error from server (NotFound): servicemonitors.monitoring.coreos.com "matchbox-dashboard" not found

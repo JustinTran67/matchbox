@@ -3,11 +3,25 @@
 A simulated stock exchange: the matching engine itself — order book, order types, and the
 matching rules that decide who trades with whom at what price.
 
-Phases 1-4 are complete: an engine with limit/market/cancel order types, two
-interchangeable matching algorithms (price-time priority and pro-rata), informed and noise
-trader populations, a correctness suite, a benchmark harness, a concurrent multi-symbol
-simulation, and the whole thing containerised behind Kafka on Kubernetes - all with
-measured results from real runs. AWS and observability are Phase 5.
+## Project summary
+
+A working exchange matching engine, built from the order book upward and then deployed the
+way a real one would be: sharded by symbol, fed through Kafka, running on Kubernetes, with
+live metrics. Every number in this README came from a run that actually happened - the
+benchmarks, the market-quality statistics, the cluster verifications, and the AWS bill.
+
+| Phase | What it added | Evidence |
+|---|---|---|
+| 1 | Order book, limit/market/cancel, price-time matching | [Design](#design), [Testing](#testing) - 63 tests, mutation-tested |
+| 2 | Pro-rata matching behind the same interface, benchmark harness | [Benchmarking](#benchmarking) - 7.7M vs 1.16M actions/s |
+| 3 | Informed + noise traders, concurrent multi-symbol simulation | [Multi-symbol simulation](#multi-symbol-simulation) - price tracking improves 4.6x |
+| 4 | Kafka wire protocol, static partition ownership, containers, local k8s | [Containerization](#containerization--orchestration) - 11,606 trades verified on kind |
+| 5 | Terraform, EKS, Prometheus/Grafana, live metrics endpoint | [Cloud deployment](#cloud-deployment-aws) - same verification passing on real AWS |
+
+The through-line is that each layer is checked against something independent rather than
+against itself: the matcher against a hand-derived model of the book, the distributed
+system against the single-process engine, and the cloud deployment against the same
+verification that passed locally.
 
 ## Build and test
 
@@ -357,6 +371,137 @@ These are real and deliberate, not oversights:
   multi-broker StatefulSet would have to derive it per pod.
 
 
+## Cloud deployment (AWS)
+
+```sh
+cd infra/terraform && terraform init && terraform apply   # VPC + EKS + node group
+../k8s/deploy-eks.sh                                      # kafka, engines, observability, verification
+cd infra/terraform && terraform destroy                   # stop the meter
+```
+
+Terraform provisions AWS only - VPC, EKS control plane, one managed node group, and the
+IAM/OIDC wiring. Kafka, the engine service and the observability stack are Kubernetes
+objects applied afterwards by `deploy-eks.sh`. Pointing Terraform's Kubernetes provider at
+a cluster the same apply is still creating means provider configuration that depends on
+resources not yet in state; Phase 4 already had a plain, inspectable deploy script, so this
+extends it rather than inventing a second mechanism.
+
+### What is not here, and why
+
+**No MSK.** Kafka is the same self-hosted StatefulSet from Phase 4, unchanged. MSK has a
+two-broker minimum and a slow create/delete cycle, which is the wrong shape for a cluster
+meant to live under two hours - and self-hosting on Kubernetes is the deeper thing to be
+able to talk about, since the design was already proven portable on kind.
+
+**No Amazon Managed Prometheus/Grafana.** `kube-prometheus-stack` runs in-cluster on nodes
+already being paid for. Self-hosting is what most teams running Kubernetes actually do, it
+is cloud-agnostic, and it avoids a per-metric bill for a demo.
+
+### Sizing, and the cost of each decision
+
+- **2 x m7i-flex.large** (2 vCPU / 8 GiB). Not the obvious `t3.large`: a new AWS account
+  starts on the Free Tier plan, which refuses to launch any instance type not marked
+  free-tier-eligible. The node group spent ~30 minutes retrying and failed with
+  `AsgInstanceLaunchFailures / InvalidParameterCombination` before this was found.
+  `m7i-flex.large` has identical specs and is eligible. Check with
+  `aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true`.
+- **One NAT gateway, not one per AZ.** Billed hourly whether traffic flows or not.
+- **On-demand, not spot** - a reclaim mid-run would corrupt the measurements being captured.
+- **Trimmed observability** - Alertmanager off, single replicas, 6h retention.
+
+### Verification on real EKS
+
+The Phase 4 end-to-end check, unmodified, against the live cluster - a fixed-seed order
+stream published to Kafka, compared against the same stream replayed through a plain
+in-process `Engine`:
+
+```
+published 20000 orders, expecting 11606 trades
+received 11606 trades (0 malformed)
+
+symbol     expected   observed   result
+AAPL           3034       3034   MATCH
+MSFT           2886       2886   MATCH
+AMZN           3120       3120   MATCH
+META           2566       2566   MATCH
+
+PASS: cluster trades match in-process ground truth
+```
+
+Byte-identical to the kind result. Moving from a local cluster to real EKS changed nothing
+about correctness, which is the point of having kept the manifests portable.
+
+### Live metrics
+
+The engine now serves `/metrics` from the same minimal socket server that already answered
+`/healthz`. Adding it created a genuine data race that did not previously exist: the
+counters were plain `std::size_t` mutated by the consumer thread and read only after
+shutdown, and a scrape reads them mid-flight. They are now `std::atomic` with relaxed
+ordering rather than mutex-guarded - independent tallies, not a transaction, and a lock
+here would undo the lock-free hot path that Phase 3 and Phase 4 were built around.
+
+Measured on the cluster under load, via Prometheus:
+
+| Metric | Value |
+|---|---|
+| Peak orders/sec (cluster) | 1,455 |
+| Peak trades/sec (cluster) | 955 |
+| Submit latency p50 | 532 ns |
+| Submit latency p99 | 2.34 us |
+
+Those latencies are the matching call itself, measured in-process and aggregated across
+pods - roughly 4x Phase 2's bare-metal p50 of 125 ns, which is what shared-tenancy virtual
+CPUs cost. The histogram corroborates the benchmark independently: on one pod, 9,125 of
+9,445 submits (96.6%) completed under 1 us.
+
+A Grafana dashboard (`infra/k8s/grafana-dashboard.yaml`) is auto-loaded by the stack's
+sidecar and renders orders/sec, trades/sec, p50/p99 via `histogram_quantile`, and symbols
+owned per pod. Evidence captured here is the raw Prometheus query output in
+`infra/evidence/`, not a dashboard screenshot.
+
+### What went wrong
+
+Reported rather than smoothed over, because these are the parts worth discussing:
+
+- **The engine pods segfaulted under sustained load.** Each restarted once or twice with
+  exit code 139, beginning when Prometheus started scraping `/metrics`, with liveness
+  probes timing out shortly before. Correctness was unaffected - the verification above ran
+  clean and the pods recovered on their own - but this is an unresolved crash in the new
+  metrics path, and it is the first thing to fix. The single-threaded health server
+  serializing 5-second scrapes behind probe requests is the leading suspect and would
+  explain the probe timeouts; the segfault itself is not yet explained.
+- **`terraform destroy` left an orphaned EBS volume.** The Kafka PVC's 2 GiB volume was
+  created by the EBS CSI driver through Kubernetes, so it was never in Terraform state and
+  survived the destroy. It had to be deleted separately. Anything dynamically provisioned
+  by an in-cluster controller is outside Terraform's view - at 2 GiB this was pennies, but
+  the same gap applies at any size.
+- **The load generator reuses the e2e binary and reports a false failure.** Its built-in
+  verification replays against a *fresh* book, so once the cluster's books hold state it
+  reports DIVERGED. It still generates real traffic, which is all it was used for here, but
+  the exit code is meaningless in that role.
+- **A brief `ErrImagePull` during rollout.** `deploy-eks.sh` applies `engine.yaml` (which
+  names a registry-less image) and then corrects it with `kubectl set image`. It self-heals;
+  it should set the image before applying.
+
+### Cost of the session
+
+Apply started 16:27:21Z, destroy completed 18:00:17Z - a **1.55 hour** billed window, most
+of it the failed node group retrying against the Free Tier restriction.
+
+| Item | Rate | Hours | Cost |
+|---|---|---|---|
+| EKS control plane | $0.10/h | 1.55 | $0.16 |
+| 2 x m7i-flex.large | $0.192/h | 0.60 | $0.12 |
+| NAT gateway | $0.045/h | 1.55 | $0.07 |
+| NAT data, EBS, ECR | - | - | ~$0.10 |
+| **Total** | | | **~$0.45** |
+
+Published on-demand rates for us-east-1; verify against the actual bill, which lags by a
+day. After teardown: zero EKS clusters, zero running instances, zero NAT gateways, zero
+EBS volumes. The ECR repository is kept deliberately - roughly $0.003/month for a 32 MB
+image, and it saves a rebuild on the next run.
+
+
 ## Layout
 
 ```
@@ -366,8 +511,10 @@ src/generator/   noise and informed trader flow, market simulator, shared id sou
 tests/           correctness and randomised stress tests, shared independent book model
 bench/           latency/throughput harness
 sim/             concurrent multi-symbol simulation and market-quality stats
-service/         Kafka-facing engine service, wire format, Dockerfile, compose stack
-infra/k8s/       Kafka + engine manifests for a local kind cluster
+service/         Kafka-facing engine service, wire format, metrics, Dockerfile, compose
+infra/k8s/       Kafka + engine + observability manifests, kind and EKS deploy scripts
+infra/terraform/ VPC, EKS control plane and node group
+infra/evidence/  captured output from the live EKS run
 ```
 
 ## License
