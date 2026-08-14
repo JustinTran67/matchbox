@@ -463,13 +463,17 @@ owned per pod. Evidence captured here is the raw Prometheus query output in
 
 Reported rather than smoothed over, because these are the parts worth discussing:
 
-- **The engine pods segfaulted under sustained load.** Each restarted once or twice with
-  exit code 139, beginning when Prometheus started scraping `/metrics`, with liveness
-  probes timing out shortly before. Correctness was unaffected - the verification above ran
-  clean and the pods recovered on their own - but this is an unresolved crash in the new
-  metrics path, and it is the first thing to fix. The single-threaded health server
-  serializing 5-second scrapes behind probe requests is the leading suspect and would
-  explain the probe timeouts; the segfault itself is not yet explained.
+- **The engine pods crash under sustained load, and the book has no memory bound.** Pods
+  restarted with exit code 139 on EKS, and the same crash reproduces locally on kind. The
+  cause is memory: a pod measured 461 MiB against its 512 MiB limit and still climbing,
+  because every resting order is held in memory and nothing evicts or bounds the book. It
+  surfaces as SIGSEGV rather than a clean OOM-kill, most likely an unchecked allocation
+  inside librdkafka's C code dereferencing null once the cgroup refuses more memory.
+  Correctness is unaffected - the verification above ran clean and pods recover on their
+  own - but a real venue bounds this with end-of-day clearing and backpressure, and this
+  engine has neither. The synthetic load generator makes it worse than real flow would:
+  each round issues fresh order ids, so resting orders accumulate without the steady state
+  that Phase 3's simulation settles into (~8,500 resting orders).
 - **`terraform destroy` left an orphaned EBS volume.** The Kafka PVC's 2 GiB volume was
   created by the EBS CSI driver through Kubernetes, so it was never in Terraform state and
   survived the destroy. It had to be deleted separately. Anything dynamically provisioned

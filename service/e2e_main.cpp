@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "generator/market_simulator.hpp"
@@ -87,6 +88,38 @@ SymbolPlan build_plan(const std::string& symbol, std::uint64_t seed, std::size_t
   return plan;
 }
 
+// Publishes one recorded stream, shifting every id by `offset`. Load rounds must not
+// replay the same ids: an id already resting on a book would collide in the engine's
+// order-id index, which is a corruption the demo would then be measuring.
+std::size_t publish_stream(RdKafka::Producer& producer, const std::string& topic,
+                           const std::vector<SymbolPlan>& plans, OrderId offset) {
+  std::size_t published = 0;
+  for (const SymbolPlan& plan : plans) {
+    for (const OrderMessage& original : plan.orders) {
+      OrderMessage message = original;
+      message.id += offset;
+      const std::string payload = encode(message);
+
+      RdKafka::ErrorCode produced = RdKafka::ERR__QUEUE_FULL;
+      while (produced == RdKafka::ERR__QUEUE_FULL) {
+        // Keyed by symbol, with no explicit partition: the partitioner decides, which is
+        // what guarantees every order for a symbol lands on one partition in order.
+        produced = producer.produce(topic, RdKafka::Topic::PARTITION_UA,
+                                    RdKafka::Producer::RK_MSG_COPY,
+                                    const_cast<char*>(payload.data()), payload.size(),
+                                    plan.symbol.data(), plan.symbol.size(), 0, nullptr);
+        if (produced == RdKafka::ERR__QUEUE_FULL) {
+          producer.poll(100);
+        }
+      }
+      if (produced == RdKafka::ERR_NO_ERROR) {
+        ++published;
+      }
+    }
+  }
+  return published;
+}
+
 bool same(const TradeMessage& a, const TradeMessage& b) {
   return a.symbol == b.symbol && a.taker_id == b.taker_id && a.maker_id == b.maker_id &&
          a.price == b.price && a.quantity == b.quantity;
@@ -130,6 +163,49 @@ int main() {
     return 1;
   }
 
+  // Traffic generator for dashboards. Verification is skipped deliberately: the ground
+  // truth here is a replay against an empty book, so comparing it against a cluster whose
+  // books already hold state reports a divergence that says nothing about correctness.
+  if (env_int("LOAD_ONLY", 0) != 0) {
+    const int load_seconds = env_int("LOAD_SECONDS", 120);
+    const double target_rate = static_cast<double>(env_int("LOAD_ORDERS_PER_SEC", 2'000));
+    constexpr OrderId kRoundStride = 10'000'000;
+
+    // Rate limited on purpose. Unthrottled, librdkafka accepts orders far faster than the
+    // engines drain them, so consumer lag grows without bound and the books swell until a
+    // pod hits its memory limit - which produces a crash loop rather than a demo. Pacing
+    // below the engines' drain rate keeps the books near steady state.
+    std::printf("\nload-only: publishing for %ds at ~%.0f orders/sec (no verification)\n",
+                load_seconds, target_rate);
+    const Clock::time_point began = Clock::now();
+    const Clock::time_point until = began + std::chrono::seconds(load_seconds);
+
+    std::size_t total = 0;
+    OrderId round = 0;
+    while (Clock::now() < until) {
+      total += publish_stream(*producer, orders_topic, plans, round * kRoundStride);
+      producer->flush(30'000);
+      ++round;
+
+      const double owed = static_cast<double>(total) / target_rate;
+      const double spent = std::chrono::duration<double>(Clock::now() - began).count();
+      if (owed > spent) {
+        std::this_thread::sleep_for(std::chrono::duration<double>(owed - spent));
+      }
+
+      std::printf("  round %llu: %zu orders published (%.0f/sec)\n",
+                  static_cast<unsigned long long>(round), total,
+                  static_cast<double>(total) /
+                      std::chrono::duration<double>(Clock::now() - began).count());
+      std::fflush(stdout);
+    }
+
+    const double elapsed = std::chrono::duration<double>(Clock::now() - began).count();
+    std::printf("\npublished %zu orders over %.1fs (%.0f orders/sec offered)\n", total, elapsed,
+                static_cast<double>(total) / elapsed);
+    return 0;
+  }
+
   // The consumer is started before publishing so no trade can be produced and expired
   // before anything is listening for it.
   std::unique_ptr<RdKafka::Conf> consumer_conf(
@@ -150,29 +226,7 @@ int main() {
     return 1;
   }
 
-  std::size_t published = 0;
-  for (const SymbolPlan& plan : plans) {
-    for (const OrderMessage& message : plan.orders) {
-      const std::string payload = encode(message);
-      RdKafka::ErrorCode produced = RdKafka::ERR__QUEUE_FULL;
-      while (produced == RdKafka::ERR__QUEUE_FULL) {
-        // Keyed by symbol, with no explicit partition: the partitioner decides, which is
-        // what guarantees every order for a symbol lands on one partition in order.
-        produced = producer->produce(orders_topic, RdKafka::Topic::PARTITION_UA,
-                                     RdKafka::Producer::RK_MSG_COPY,
-                                     const_cast<char*>(payload.data()), payload.size(),
-                                     plan.symbol.data(), plan.symbol.size(), 0, nullptr);
-        if (produced == RdKafka::ERR__QUEUE_FULL) {
-          producer->poll(100);
-        }
-      }
-      if (produced != RdKafka::ERR_NO_ERROR) {
-        std::fprintf(stderr, "produce failed: %s\n", RdKafka::err2str(produced).c_str());
-        return 1;
-      }
-      ++published;
-    }
-  }
+  const std::size_t published = publish_stream(*producer, orders_topic, plans, 0);
   producer->flush(30'000);
   std::printf("published %zu orders, expecting %zu trades\n", published, expected_total);
   std::fflush(stdout);
