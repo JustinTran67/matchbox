@@ -71,7 +71,6 @@ helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
   --set prometheus.prometheusSpec.resources.requests.cpu=200m \
   --set prometheus.prometheusSpec.resources.requests.memory=768Mi \
   --set grafana.replicas=1 \
-  --set grafana.adminPassword=matchbox \
   --set grafana.sidecar.dashboards.searchNamespace=ALL \
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
   --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
@@ -123,6 +122,7 @@ kubectl run promquery --rm -i --restart=Never --image=curlimages/curl:latest -- 
 
 echo
 echo "==> e2e exit code: ${E2E_EXIT}"
-echo "==> Grafana: kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80  (admin/matchbox)"
+echo "==> Grafana user is admin; read its generated password with:"
+echo "    kubectl -n monitoring get secret monitoring-grafana -o jsonpath=\"{.data.admin-password}\" | base64 -d; echo"
 echo "==> TEAR DOWN when finished:  terraform -chdir=${TF_DIR} destroy"
 exit "${E2E_EXIT}"

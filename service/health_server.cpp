@@ -3,6 +3,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -14,6 +15,7 @@ namespace matchbox::service {
 namespace {
 
 constexpr int kAcceptPollMs = 200;
+constexpr int kClientTimeoutSeconds = 2;
 
 const char* kReadyResponse =
     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: "
@@ -118,6 +120,14 @@ void HealthServer::serve() {
     if (client < 0) {
       continue;
     }
+
+    // One accept loop serves both the readiness probe and the metrics scrape, so a client
+    // that connects and then says nothing would otherwise block it forever - and a stalled
+    // health endpoint is a killed pod. Timeouts bound how long any one peer can hold it.
+    timeval timeout{};
+    timeout.tv_sec = kClientTimeoutSeconds;
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    ::setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
     char scratch[2048];
     const ssize_t received = ::recv(client, scratch, sizeof(scratch) - 1, 0);

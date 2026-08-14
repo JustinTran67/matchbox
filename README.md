@@ -506,6 +506,49 @@ EBS volumes. The ECR repository is kept deliberately - roughly $0.003/month for 
 image, and it saves a rebuild on the next run.
 
 
+## Input handling and failure modes
+
+The engine consumes from a Kafka topic, so every order message is untrusted input. Three
+defects in that path were found by testing it directly, and all three are fixed with
+regression tests:
+
+**A mistyped field crashed the service permanently.** `nlohmann`'s
+`parse(..., allow_exceptions=false)` suppresses *parse* errors but not *type* errors, so
+`{"id":"not-a-number"}` threw out of the decoder and terminated the process. Because the
+consumer offset is only committed after a message is handled, the pod restarted, re-read
+the same message, and died again - one malformed message was enough to take a symbol
+offline indefinitely. Every field is now type-checked before extraction, and a malformed
+message is counted and skipped.
+
+**A duplicate order id corrupted the book in optimised builds.** The guard was an `assert`,
+and the container image builds with `-DMATCHBOX_ENABLE_ASSERTS=OFF`, so it was compiled out
+exactly where untrusted ids arrive. Admitting the duplicate left the order-id index
+tracking one order while the price level held two: `resting_order_count` reported 0 while
+`depth_at` still reported 50, and the orphaned order could still trade but could never be
+cancelled. `Engine::submit` now rejects duplicate and zero-quantity orders at runtime and
+reports `rejected` on the execution report.
+
+**A silent client could stall the health endpoint.** The health server is a single accept
+loop with no receive timeout, so one connection that opened and sent nothing blocked both
+readiness probes and metrics scrapes until Kubernetes killed the pod. Accepted sockets now
+carry a 2 second send and receive timeout.
+
+Known and unfixed, in rough order of how much they would matter in a real deployment:
+
+- **The book has no memory bound.** Sustained order flow grows it until the pod hits its
+  memory limit and dies. Fixing it properly means a policy decision - reject past a depth
+  cap, apply backpressure, or clear the book on a session boundary the way a real venue
+  does - rather than a patch.
+- **Kafka runs as PLAINTEXT with no authentication.** Anything that can reach the broker
+  can submit orders. Acceptable for a cluster-local demo, not for anything else; a real
+  deployment needs TLS and SASL, and an authenticated notion of who owns an order id.
+- **`/metrics` is unauthenticated** on the same port as the health probe. It exposes only
+  counters, but it is one more thing listening.
+- ~~The Grafana password was a literal in `deploy.sh`.~~ Fixed: the Helm chart now
+  generates a random password into a Kubernetes Secret, and the scripts print the command
+  to read it back. Nothing about the deployment carries a credential in version control.
+
+
 ## Layout
 
 ```

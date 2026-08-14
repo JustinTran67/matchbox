@@ -91,11 +91,29 @@ SymbolPlan build_plan(const std::string& symbol, std::uint64_t seed, std::size_t
 // Publishes one recorded stream, shifting every id by `offset`. Load rounds must not
 // replay the same ids: an id already resting on a book would collide in the engine's
 // order-id index, which is a corruption the demo would then be measuring.
+// `paced_from`/`target_rate` throttle inside the loop rather than between calls. Pacing a
+// whole round at a time would publish every order at line rate and then sleep off the
+// remainder, which arrives as a burst followed by silence instead of a steady stream.
 std::size_t publish_stream(RdKafka::Producer& producer, const std::string& topic,
-                           const std::vector<SymbolPlan>& plans, OrderId offset) {
+                           const std::vector<SymbolPlan>& plans, OrderId offset,
+                           double target_rate, Clock::time_point paced_from,
+                           std::size_t already_published) {
   std::size_t published = 0;
+
+  // Round-robin across symbols rather than draining one at a time. Symbols map onto
+  // partitions, and partitions onto engines, so publishing a symbol to exhaustion leaves
+  // three of the four engines idle for the duration of that block.
+  std::size_t longest = 0;
   for (const SymbolPlan& plan : plans) {
-    for (const OrderMessage& original : plan.orders) {
+    longest = std::max(longest, plan.orders.size());
+  }
+
+  for (std::size_t index = 0; index < longest; ++index) {
+    for (const SymbolPlan& plan : plans) {
+      if (index >= plan.orders.size()) {
+        continue;
+      }
+      const OrderMessage& original = plan.orders[index];
       OrderMessage message = original;
       message.id += offset;
       const std::string payload = encode(message);
@@ -114,6 +132,16 @@ std::size_t publish_stream(RdKafka::Producer& producer, const std::string& topic
       }
       if (produced == RdKafka::ERR_NO_ERROR) {
         ++published;
+      }
+
+      // Checked every 25 orders so the sleep granularity stays coarse enough not to
+      // dominate the work being paced.
+      if (target_rate > 0.0 && published % 25 == 0) {
+        const double owed = static_cast<double>(already_published + published) / target_rate;
+        const double spent = std::chrono::duration<double>(Clock::now() - paced_from).count();
+        if (owed > spent) {
+          std::this_thread::sleep_for(std::chrono::duration<double>(owed - spent));
+        }
       }
     }
   }
@@ -183,15 +211,10 @@ int main() {
     std::size_t total = 0;
     OrderId round = 0;
     while (Clock::now() < until) {
-      total += publish_stream(*producer, orders_topic, plans, round * kRoundStride);
+      total += publish_stream(*producer, orders_topic, plans, round * kRoundStride,
+                              target_rate, began, total);
       producer->flush(30'000);
       ++round;
-
-      const double owed = static_cast<double>(total) / target_rate;
-      const double spent = std::chrono::duration<double>(Clock::now() - began).count();
-      if (owed > spent) {
-        std::this_thread::sleep_for(std::chrono::duration<double>(owed - spent));
-      }
 
       std::printf("  round %llu: %zu orders published (%.0f/sec)\n",
                   static_cast<unsigned long long>(round), total,
@@ -226,7 +249,7 @@ int main() {
     return 1;
   }
 
-  const std::size_t published = publish_stream(*producer, orders_topic, plans, 0);
+  const std::size_t published = publish_stream(*producer, orders_topic, plans, 0, 0.0, Clock::now(), 0);
   producer->flush(30'000);
   std::printf("published %zu orders, expecting %zu trades\n", published, expected_total);
   std::fflush(stdout);

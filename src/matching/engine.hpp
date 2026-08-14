@@ -18,6 +18,11 @@ struct ExecutionReport {
   Quantity filled_quantity{0};
   Quantity resting_quantity{0};
   Quantity cancelled_quantity{0};
+  // Set when the order was refused outright and never reached a book. The order id is the
+  // book's identity for an order, so a duplicate cannot be admitted: the id index would
+  // keep only one of them while both sat in the price level, leaving liquidity that can
+  // still trade but can never be cancelled.
+  bool rejected{false};
 };
 
 class Engine {

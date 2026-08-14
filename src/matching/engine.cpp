@@ -10,14 +10,21 @@ Engine::Engine(std::unique_ptr<MatchingStrategy> strategy) : strategy_(std::move
 }
 
 ExecutionReport Engine::submit(Order order) {
-  assert(order.quantity > 0);
-  assert(!book_.contains(order.id));
+  ExecutionReport report;
+  report.order_id = order.id;
+
+  // Checked at runtime, not by assert: order ids arrive from outside the process, and
+  // optimised builds define NDEBUG, so an assert here would vanish exactly where the
+  // untrusted input actually lands.
+  if (order.quantity == 0 || book_.contains(order.id)) {
+    report.rejected = true;
+    report.cancelled_quantity = order.quantity;
+    return report;
+  }
 
   order.sequence = next_sequence_++;
 
   const Quantity submitted = order.quantity;
-  ExecutionReport report;
-  report.order_id = order.id;
   strategy_->match(book_, order, report.trades);
   report.filled_quantity = submitted - order.quantity;
 

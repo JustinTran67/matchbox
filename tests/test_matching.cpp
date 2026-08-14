@@ -191,3 +191,33 @@ TEST_CASE("the strategy interface reports the active algorithm") {
   const Engine engine = make_engine();
   REQUIRE(engine.strategy_name() == "price-time");
 }
+
+TEST_CASE("a duplicate order id is rejected rather than corrupting the book") {
+  Engine engine = make_engine();
+  const ExecutionReport first = engine.submit(limit(7, Side::Buy, 100, 50));
+  REQUIRE_FALSE(first.rejected);
+  REQUIRE(first.resting_quantity == 50);
+
+  // Ids come from outside the process, so this has to hold in optimised builds too, where
+  // NDEBUG strips asserts. Admitting the duplicate would leave the id index tracking one
+  // order while the price level held two - liquidity that trades but cannot be cancelled.
+  const ExecutionReport duplicate = engine.submit(limit(7, Side::Buy, 100, 50));
+  REQUIRE(duplicate.rejected);
+  REQUIRE(duplicate.trades.empty());
+  REQUIRE(duplicate.resting_quantity == 0);
+  REQUIRE(duplicate.cancelled_quantity == 50);
+
+  REQUIRE(engine.book().resting_order_count() == 1);
+  REQUIRE(engine.book().depth_at(Side::Buy, 100) == 50);
+
+  REQUIRE(engine.cancel(7));
+  REQUIRE(engine.book().resting_order_count() == 0);
+  REQUIRE(engine.book().depth_at(Side::Buy, 100) == 0);
+}
+
+TEST_CASE("a zero-quantity order is rejected") {
+  Engine engine = make_engine();
+  const ExecutionReport report = engine.submit(limit(1, Side::Buy, 100, 0));
+  REQUIRE(report.rejected);
+  REQUIRE(engine.book().resting_order_count() == 0);
+}

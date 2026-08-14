@@ -183,3 +183,35 @@ TEST_CASE("malformed wire input is rejected rather than half-decoded") {
           .has_value());
   REQUIRE_FALSE(service::decode_trade(R"({"symbol":"A","taker_id":1})").has_value());
 }
+
+TEST_CASE("mistyped wire fields are rejected instead of throwing") {
+  // parse(..., allow_exceptions=false) stops parse errors but not get<T>() type errors.
+  // An exception escaping here terminates the service, and since the offset is not
+  // committed past the message, the pod would crash-loop on the same one indefinitely.
+  const char* poison[] = {
+      R"({"symbol":"A","action":"submit","id":"nope","side":"buy","type":"limit","quantity":5,"price":1})",
+      R"({"symbol":"A","action":"submit","id":-1,"side":"buy","type":"limit","quantity":5,"price":1})",
+      R"({"symbol":"A","action":"submit","id":1,"side":"buy","type":"limit","quantity":-5,"price":1})",
+      R"({"symbol":123,"action":"submit","id":1,"side":"buy","type":"limit","quantity":5,"price":1})",
+      R"({"symbol":"A","action":"submit","id":1,"side":"buy","type":"limit","quantity":5,"price":"x"})",
+      R"({"symbol":"A","action":"submit","id":1,"side":true,"type":"limit","quantity":5,"price":1})",
+      R"({"symbol":"A","action":"cancel","id":{"nested":1}})",
+      R"({"symbol":"","action":"submit","id":1,"side":"buy","type":"limit","quantity":5,"price":1})",
+  };
+  for (const char* payload : poison) {
+    INFO(payload);
+    REQUIRE_NOTHROW(service::decode_order(payload));
+    REQUIRE_FALSE(service::decode_order(payload).has_value());
+  }
+
+  const char* poison_trades[] = {
+      R"({"symbol":"A","taker_id":"x","maker_id":2,"price":1,"quantity":1})",
+      R"({"symbol":"A","taker_id":1,"maker_id":2,"price":{},"quantity":1})",
+      R"({"symbol":null,"taker_id":1,"maker_id":2,"price":1,"quantity":1})",
+  };
+  for (const char* payload : poison_trades) {
+    INFO(payload);
+    REQUIRE_NOTHROW(service::decode_trade(payload));
+    REQUIRE_FALSE(service::decode_trade(payload).has_value());
+  }
+}

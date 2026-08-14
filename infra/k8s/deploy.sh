@@ -46,7 +46,6 @@ if [[ "${WITH_MONITORING:-1}" == "1" ]]; then
     --namespace monitoring --create-namespace \
     --set alertmanager.enabled=false \
     --set prometheus.prometheusSpec.retention=6h \
-    --set grafana.adminPassword=matchbox \
     --set grafana.sidecar.dashboards.searchNamespace=ALL \
     --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
     --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
@@ -80,9 +79,12 @@ if [[ "${WITH_MONITORING:-1}" == "1" ]]; then
            --env=KAFKA_BROKERS=kafka-0.kafka.default.svc.cluster.local:9092 \
            --env=LOAD_ONLY=1 --env=LOAD_SECONDS=300 --env=STEPS=5000 \
            --command -- /usr/local/bin/matchbox_e2e
-    2. open Grafana:
+    2. read the generated Grafana password (created by the chart, never committed):
+         kubectl -n monitoring get secret monitoring-grafana \
+           -o jsonpath="{.data.admin-password}" | base64 -d; echo
+    3. open Grafana as user "admin":
          kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
-         http://localhost:3000  (admin / matchbox)  ->  dashboard "matchbox engine"
+         http://localhost:3000  ->  dashboard "matchbox engine"
 EOF
 fi
 

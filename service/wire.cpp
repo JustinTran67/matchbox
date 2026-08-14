@@ -30,6 +30,43 @@ std::optional<OrderType> type_from(const std::string& text) {
   return std::nullopt;
 }
 
+// nlohmann's parse(..., allow_exceptions=false) suppresses *parse* errors only; get<T>()
+// on a mistyped field still throws. Untrusted input reaches this decoder straight off a
+// Kafka topic, and an escaping exception terminates the process - and because the offset
+// is not committed past the message, the pod crash-loops on the same poison pill forever.
+// Every field is therefore type-checked before extraction.
+bool read_id(const json& document, const char* key, OrderId& out) {
+  if (!document.contains(key) || !document[key].is_number_unsigned()) {
+    return false;
+  }
+  out = document[key].get<OrderId>();
+  return true;
+}
+
+bool read_quantity(const json& document, const char* key, Quantity& out) {
+  if (!document.contains(key) || !document[key].is_number_unsigned()) {
+    return false;
+  }
+  out = document[key].get<Quantity>();
+  return true;
+}
+
+bool read_price(const json& document, const char* key, Price& out) {
+  if (!document.contains(key) || !document[key].is_number_integer()) {
+    return false;
+  }
+  out = document[key].get<Price>();
+  return true;
+}
+
+bool read_string(const json& document, const char* key, std::string& out) {
+  if (!document.contains(key) || !document[key].is_string()) {
+    return false;
+  }
+  out = document[key].get<std::string>();
+  return true;
+}
+
 }  // namespace
 
 Order OrderMessage::to_order() const {
@@ -73,44 +110,39 @@ std::optional<OrderMessage> decode_order(std::string_view json_text) {
   if (document.is_discarded() || !document.is_object()) {
     return std::nullopt;
   }
-  if (!document.contains("symbol") || !document.contains("action") || !document.contains("id")) {
-    return std::nullopt;
-  }
 
   OrderMessage message;
-  message.symbol = document["symbol"].get<std::string>();
-  const std::string action = document["action"].get<std::string>();
-  if (action != "submit" && action != "cancel") {
+  std::string action;
+  if (!read_string(document, "symbol", message.symbol) ||
+      !read_string(document, "action", action) || !read_id(document, "id", message.id)) {
+    return std::nullopt;
+  }
+  if (message.symbol.empty() || (action != "submit" && action != "cancel")) {
     return std::nullopt;
   }
   message.is_cancel = action == "cancel";
-  message.id = document["id"].get<OrderId>();
-
   if (message.is_cancel) {
     return message;
   }
 
-  if (!document.contains("side") || !document.contains("type") ||
-      !document.contains("quantity")) {
+  std::string side_text;
+  std::string type_text;
+  if (!read_string(document, "side", side_text) || !read_string(document, "type", type_text) ||
+      !read_quantity(document, "quantity", message.quantity)) {
     return std::nullopt;
   }
-  const std::optional<Side> side = side_from(document["side"].get<std::string>());
-  const std::optional<OrderType> type = type_from(document["type"].get<std::string>());
-  if (!side.has_value() || !type.has_value()) {
+
+  const std::optional<Side> side = side_from(side_text);
+  const std::optional<OrderType> type = type_from(type_text);
+  if (!side.has_value() || !type.has_value() || message.quantity == 0) {
     return std::nullopt;
   }
   message.side = *side;
   message.type = *type;
-  message.quantity = document["quantity"].get<Quantity>();
-  if (message.quantity == 0) {
-    return std::nullopt;
-  }
+
   // A market order carries no price, so its absence is expected rather than malformed.
-  if (message.type == OrderType::Limit) {
-    if (!document.contains("price")) {
-      return std::nullopt;
-    }
-    message.price = document["price"].get<Price>();
+  if (message.type == OrderType::Limit && !read_price(document, "price", message.price)) {
+    return std::nullopt;
   }
   return message;
 }
@@ -120,18 +152,15 @@ std::optional<TradeMessage> decode_trade(std::string_view json_text) {
   if (document.is_discarded() || !document.is_object()) {
     return std::nullopt;
   }
-  for (const char* field : {"symbol", "taker_id", "maker_id", "price", "quantity"}) {
-    if (!document.contains(field)) {
-      return std::nullopt;
-    }
-  }
 
   TradeMessage message;
-  message.symbol = document["symbol"].get<std::string>();
-  message.taker_id = document["taker_id"].get<OrderId>();
-  message.maker_id = document["maker_id"].get<OrderId>();
-  message.price = document["price"].get<Price>();
-  message.quantity = document["quantity"].get<Quantity>();
+  if (!read_string(document, "symbol", message.symbol) ||
+      !read_id(document, "taker_id", message.taker_id) ||
+      !read_id(document, "maker_id", message.maker_id) ||
+      !read_price(document, "price", message.price) ||
+      !read_quantity(document, "quantity", message.quantity)) {
+    return std::nullopt;
+  }
   return message;
 }
 
