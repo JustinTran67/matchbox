@@ -1,0 +1,107 @@
+# Local iteration loop. Same topology as the Kubernetes manifests - one broker, four
+# partitions, four engine replicas with static ordinals - but it comes up in seconds, so
+# the wire format and matching path can be shaken out before kind is involved at all.
+#
+#   docker compose -f service/docker-compose.yml up --build -d
+#   docker compose -f service/docker-compose.yml run --rm e2e
+#   docker compose -f service/docker-compose.yml down -v
+
+name: matchbox
+
+x-engine: &engine
+  build:
+    context: ..
+    dockerfile: service/Dockerfile
+  image: matchbox-engine:dev
+  depends_on:
+    kafka-init:
+      condition: service_completed_successfully
+  environment: &engine-env
+    KAFKA_BROKERS: kafka:9092
+    REPLICA_COUNT: "4"
+    PARTITION_COUNT: "4"
+    HEALTH_PORT: "8080"
+  restart: unless-stopped
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: matchbox-local-cluster
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  # Topics are created explicitly rather than auto-created, because auto-creation would use
+  # the broker default partition count and silently break the one-owner-per-partition model.
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic matchbox.orders --partitions 4 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic matchbox.trades --partitions 4 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+  engine-0:
+    <<: *engine
+    hostname: matchbox-engine-0
+    environment:
+      <<: *engine-env
+      POD_NAME: matchbox-engine-0
+
+  engine-1:
+    <<: *engine
+    hostname: matchbox-engine-1
+    environment:
+      <<: *engine-env
+      POD_NAME: matchbox-engine-1
+
+  engine-2:
+    <<: *engine
+    hostname: matchbox-engine-2
+    environment:
+      <<: *engine-env
+      POD_NAME: matchbox-engine-2
+
+  engine-3:
+    <<: *engine
+    hostname: matchbox-engine-3
+    environment:
+      <<: *engine-env
+      POD_NAME: matchbox-engine-3
+
+  # Not started by `up`; run on demand once the engines are healthy.
+  e2e:
+    build:
+      context: ..
+      dockerfile: service/Dockerfile
+    image: matchbox-engine:dev
+    profiles: ["verify"]
+    entrypoint: ["/usr/local/bin/matchbox_e2e"]
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      STEPS: "5000"
+      WAIT_SECONDS: "90"

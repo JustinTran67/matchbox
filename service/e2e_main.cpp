@@ -1,0 +1,248 @@
+// End-to-end check of the deployed system against an in-process ground truth.
+//
+// The same recorded order stream is (a) published to Kafka for the cluster to match and
+// (b) replayed through a plain Engine here. The cluster's published trades then have to
+// agree with the local replay, symbol by symbol, in order. The ground truth deliberately
+// reuses the Phase 1-3 engine untouched, so this compares the distributed system against
+// the thing already proven correct rather than against itself.
+
+#include <librdkafka/rdkafkacpp.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "generator/market_simulator.hpp"
+#include "matching/engine.hpp"
+#include "matching/fifo_matcher.hpp"
+#include "wire.hpp"
+
+using namespace matchbox;
+using namespace matchbox::service;
+using Clock = std::chrono::steady_clock;
+
+namespace {
+
+std::string env_or(const char* name, const std::string& fallback) {
+  const char* value = std::getenv(name);
+  return value == nullptr ? fallback : std::string(value);
+}
+
+int env_int(const char* name, int fallback) {
+  const char* value = std::getenv(name);
+  return value == nullptr ? fallback : std::atoi(value);
+}
+
+struct SymbolPlan {
+  std::string symbol;
+  std::vector<OrderMessage> orders;
+  std::vector<TradeMessage> expected_trades;
+};
+
+// Records a stream and its ground-truth trades in one pass: the generator adapts to the
+// book it is fed, so the stream can only be replayed faithfully if it was captured against
+// a book evolving exactly as the service's will.
+SymbolPlan build_plan(const std::string& symbol, std::uint64_t seed, std::size_t steps) {
+  SymbolPlan plan;
+  plan.symbol = symbol;
+
+  Engine engine(std::make_unique<FifoMatcher>());
+  MarketSimulatorConfig config;
+  MarketSimulator market(config, seed);
+
+  for (std::size_t step = 0; step < steps; ++step) {
+    const OrderGenerator::Action action = market.next(engine.book());
+
+    OrderMessage message;
+    message.symbol = symbol;
+    if (action.kind == OrderGenerator::Action::Kind::Cancel) {
+      message.is_cancel = true;
+      message.id = action.cancel_id;
+      plan.orders.push_back(message);
+      engine.cancel(action.cancel_id);
+      continue;
+    }
+
+    const Order& order = action.order;
+    message.is_cancel = false;
+    message.id = order.id;
+    message.side = order.side;
+    message.type = order.type;
+    message.price = order.price;
+    message.quantity = order.quantity;
+    plan.orders.push_back(message);
+
+    const ExecutionReport report = engine.submit(order);
+    for (const Trade& trade : report.trades) {
+      plan.expected_trades.push_back(
+          TradeMessage{symbol, trade.taker_id, trade.maker_id, trade.price, trade.quantity});
+    }
+  }
+  return plan;
+}
+
+bool same(const TradeMessage& a, const TradeMessage& b) {
+  return a.symbol == b.symbol && a.taker_id == b.taker_id && a.maker_id == b.maker_id &&
+         a.price == b.price && a.quantity == b.quantity;
+}
+
+}  // namespace
+
+int main() {
+  const std::string brokers = env_or("KAFKA_BROKERS", "localhost:9092");
+  const std::string orders_topic = env_or("ORDERS_TOPIC", "matchbox.orders");
+  const std::string trades_topic = env_or("TRADES_TOPIC", "matchbox.trades");
+  const std::size_t steps = static_cast<std::size_t>(env_int("STEPS", 5'000));
+  const int wait_seconds = env_int("WAIT_SECONDS", 60);
+
+  const std::vector<std::string> symbols = {"AAPL", "MSFT", "AMZN", "META"};
+
+  std::printf("matchbox end-to-end verification\n");
+  std::printf("  brokers : %s\n", brokers.c_str());
+  std::printf("  steps   : %zu per symbol across %zu symbols\n", steps, symbols.size());
+
+  std::vector<SymbolPlan> plans;
+  std::size_t expected_total = 0;
+  for (std::size_t i = 0; i < symbols.size(); ++i) {
+    plans.push_back(build_plan(symbols[i], 1'000 + i * 31, steps));
+    expected_total += plans.back().expected_trades.size();
+    std::printf("  %-6s %zu orders -> %zu expected trades\n", plans.back().symbol.c_str(),
+                plans.back().orders.size(), plans.back().expected_trades.size());
+  }
+  if (expected_total == 0) {
+    std::fprintf(stderr, "generated stream produced no trades; nothing to verify\n");
+    return 1;
+  }
+
+  std::string error;
+  std::unique_ptr<RdKafka::Conf> conf(RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL));
+  conf->set("bootstrap.servers", brokers, error);
+
+  std::unique_ptr<RdKafka::Producer> producer(RdKafka::Producer::create(conf.get(), error));
+  if (producer == nullptr) {
+    std::fprintf(stderr, "producer: %s\n", error.c_str());
+    return 1;
+  }
+
+  // The consumer is started before publishing so no trade can be produced and expired
+  // before anything is listening for it.
+  std::unique_ptr<RdKafka::Conf> consumer_conf(
+      RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL));
+  consumer_conf->set("bootstrap.servers", brokers, error);
+  consumer_conf->set("group.id", env_or("E2E_GROUP", "matchbox-e2e"), error);
+  consumer_conf->set("auto.offset.reset", "earliest", error);
+  consumer_conf->set("enable.auto.commit", "false", error);
+
+  std::unique_ptr<RdKafka::KafkaConsumer> consumer(
+      RdKafka::KafkaConsumer::create(consumer_conf.get(), error));
+  if (consumer == nullptr) {
+    std::fprintf(stderr, "consumer: %s\n", error.c_str());
+    return 1;
+  }
+  if (consumer->subscribe({trades_topic}) != RdKafka::ERR_NO_ERROR) {
+    std::fprintf(stderr, "subscribe to %s failed\n", trades_topic.c_str());
+    return 1;
+  }
+
+  std::size_t published = 0;
+  for (const SymbolPlan& plan : plans) {
+    for (const OrderMessage& message : plan.orders) {
+      const std::string payload = encode(message);
+      RdKafka::ErrorCode produced = RdKafka::ERR__QUEUE_FULL;
+      while (produced == RdKafka::ERR__QUEUE_FULL) {
+        // Keyed by symbol, with no explicit partition: the partitioner decides, which is
+        // what guarantees every order for a symbol lands on one partition in order.
+        produced = producer->produce(orders_topic, RdKafka::Topic::PARTITION_UA,
+                                     RdKafka::Producer::RK_MSG_COPY,
+                                     const_cast<char*>(payload.data()), payload.size(),
+                                     plan.symbol.data(), plan.symbol.size(), 0, nullptr);
+        if (produced == RdKafka::ERR__QUEUE_FULL) {
+          producer->poll(100);
+        }
+      }
+      if (produced != RdKafka::ERR_NO_ERROR) {
+        std::fprintf(stderr, "produce failed: %s\n", RdKafka::err2str(produced).c_str());
+        return 1;
+      }
+      ++published;
+    }
+  }
+  producer->flush(30'000);
+  std::printf("published %zu orders, expecting %zu trades\n", published, expected_total);
+  std::fflush(stdout);
+
+  std::map<std::string, std::vector<TradeMessage>> observed;
+  std::size_t received = 0;
+  std::size_t malformed = 0;
+  const Clock::time_point deadline = Clock::now() + std::chrono::seconds(wait_seconds);
+  Clock::time_point last_progress = Clock::now();
+
+  while (received < expected_total && Clock::now() < deadline) {
+    std::unique_ptr<RdKafka::Message> message(consumer->consume(1'000));
+    if (message->err() == RdKafka::ERR_NO_ERROR) {
+      const std::string_view payload(static_cast<const char*>(message->payload()),
+                                     message->len());
+      const std::optional<TradeMessage> trade = decode_trade(payload);
+      if (!trade.has_value()) {
+        ++malformed;
+        continue;
+      }
+      observed[trade->symbol].push_back(*trade);
+      ++received;
+      last_progress = Clock::now();
+      if (received % 5'000 == 0) {
+        std::printf("  received %zu/%zu\n", received, expected_total);
+        std::fflush(stdout);
+      }
+    } else if (message->err() != RdKafka::ERR__TIMED_OUT &&
+               message->err() != RdKafka::ERR__PARTITION_EOF) {
+      std::fprintf(stderr, "consume error: %s\n", message->errstr().c_str());
+    }
+
+    // Stop early once the flow has clearly dried up, rather than always burning the full
+    // timeout when trades are missing.
+    if (received > 0 && Clock::now() - last_progress > std::chrono::seconds(15)) {
+      std::fprintf(stderr, "no new trades for 15s; stopping early\n");
+      break;
+    }
+  }
+  consumer->close();
+
+  std::printf("\nreceived %zu trades (%zu malformed)\n", received, malformed);
+  std::printf("%-8s %10s %10s   %s\n", "symbol", "expected", "observed", "result");
+  std::printf("--------------------------------------------------\n");
+
+  bool ok = received == expected_total && malformed == 0;
+  for (const SymbolPlan& plan : plans) {
+    const std::vector<TradeMessage>& actual = observed[plan.symbol];
+    bool matches = actual.size() == plan.expected_trades.size();
+    std::size_t first_divergence = 0;
+    if (matches) {
+      for (std::size_t i = 0; i < actual.size(); ++i) {
+        if (!same(actual[i], plan.expected_trades[i])) {
+          matches = false;
+          first_divergence = i;
+          break;
+        }
+      }
+    }
+    std::printf("%-8s %10zu %10zu   %s", plan.symbol.c_str(), plan.expected_trades.size(),
+                actual.size(), matches ? "MATCH\n" : "DIVERGED");
+    if (!matches && actual.size() == plan.expected_trades.size()) {
+      std::printf(" at trade %zu\n", first_divergence);
+    } else if (!matches) {
+      std::printf(" (count mismatch)\n");
+    }
+    ok = ok && matches;
+  }
+
+  std::printf("\n%s\n", ok ? "PASS: cluster trades match in-process ground truth"
+                           : "FAIL: cluster trades diverge from ground truth");
+  return ok ? 0 : 1;
+}

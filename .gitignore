@@ -1,6 +1,7 @@
 build/
 build-bench/
 build-tsan/
+build-service/
 compile_commands.json
 .cache/
 .DS_Store

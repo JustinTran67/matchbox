@@ -44,7 +44,39 @@ if(MATCHBOX_ENABLE_ASSERTS)
   target_compile_options(matchbox_core PRIVATE -UNDEBUG)
 endif()
 
+include(FetchContent)
+
+# Header-only, and fetched the same way Catch2 already is.
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.11.3
+  GIT_SHALLOW ON
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+# The container image builds only the service, so tests/bench/sim (and their Catch2 fetch)
+# can be switched off to keep the image build lean.
+option(MATCHBOX_BUILD_TESTS "Build the test suite" ON)
+option(MATCHBOX_BUILD_BENCH "Build the benchmark harness" ON)
+
+# librdkafka is a system package, not a fetched dependency: it drags in OpenSSL, zlib, zstd
+# and lz4, and rebuilding that chain on every configure would be slow and brittle.
+find_package(PkgConfig)
+set(MATCHBOX_BUILD_SERVICE OFF)
+if(PkgConfig_FOUND)
+  pkg_check_modules(RDKAFKA IMPORTED_TARGET rdkafka++)
+  if(RDKAFKA_FOUND)
+    set(MATCHBOX_BUILD_SERVICE ON)
+  endif()
+endif()
+
 enable_testing()
 add_subdirectory(sim)
-add_subdirectory(tests)
-add_subdirectory(bench)
+add_subdirectory(service)
+if(MATCHBOX_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
+if(MATCHBOX_BUILD_BENCH)
+  add_subdirectory(bench)
+endif()

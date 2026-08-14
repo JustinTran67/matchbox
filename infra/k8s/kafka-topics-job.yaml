@@ -1,0 +1,33 @@
+# Partition count is the deployment's core invariant - it fixes how many engine replicas
+# can exist - so it is declared here explicitly rather than inherited from a broker default.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topics
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-topics
+          image: apache/kafka:3.9.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              BROKER=kafka-0.kafka.default.svc.cluster.local:9092
+              until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "$BROKER" >/dev/null 2>&1; do
+                echo "waiting for broker..."
+                sleep 3
+              done
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BROKER" \
+                --create --if-not-exists --topic matchbox.orders --partitions 4 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BROKER" \
+                --create --if-not-exists --topic matchbox.trades --partitions 4 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BROKER" --describe
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"

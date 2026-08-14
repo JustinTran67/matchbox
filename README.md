@@ -3,10 +3,11 @@
 A simulated stock exchange: the matching engine itself — order book, order types, and the
 matching rules that decide who trades with whom at what price.
 
-Phases 1-3 are complete: an engine with limit/market/cancel order types, two
+Phases 1-4 are complete: an engine with limit/market/cancel order types, two
 interchangeable matching algorithms (price-time priority and pro-rata), informed and noise
-trader populations, a correctness suite, a benchmark harness, and a concurrent
-multi-symbol simulation - all with measured results. Containerisation is Phase 4.
+trader populations, a correctness suite, a benchmark harness, a concurrent multi-symbol
+simulation, and the whole thing containerised behind Kafka on Kubernetes - all with
+measured results from real runs. AWS and observability are Phase 5.
 
 ## Build and test
 
@@ -260,6 +261,102 @@ symbol field and there is no routing layer: partitioning order flow by symbol is
 in Phase 4, and building a dispatcher now would be replaced by it. The determinism test is
 what proves the isolation is real rather than assumed.
 
+## Containerization & orchestration
+
+```sh
+# fast loop: compose
+docker compose -f service/docker-compose.yml up --build -d
+docker compose -f service/docker-compose.yml run --rm e2e
+
+# the real thing: kind
+./infra/k8s/deploy.sh
+```
+
+Order flow arrives on a 4-partition `matchbox.orders` topic keyed by symbol, and trades go
+out on `matchbox.trades`. Keying by symbol is what buys per-symbol ordering: price-time
+priority is meaningless if a symbol's own orders can be reordered in transit.
+
+### Why partitions are assigned statically
+
+The engine service calls `assign()` on a fixed partition list rather than `subscribe()`
+with a consumer group. Each pod derives its partitions from the ordinal on the end of its
+own name (`matchbox-engine-2` -> 2), injected via the downward API, which is why the
+workload is a `StatefulSet` rather than a `Deployment` - a Deployment's random pod suffixes
+carry no stable identity to derive ownership from.
+
+This is a matching-engine constraint, not a generic microservices preference. Consumer
+groups rebalance, and a rebalance has a window where ownership of a partition can overlap
+between members. For a stateless consumer that window is harmless: the work is idempotent
+and the worst case is duplicated effort. An engine's order book is the opposite - mutable,
+in-memory, and the sole authority for its symbol. Two pods believing they own one symbol
+would each match against their own divergent copy of that book and publish conflicting
+trades for it, with nothing in the pipeline able to detect that the two disagree. Static
+assignment removes the window rather than trying to survive it.
+
+The ownership function is small enough to check exhaustively instead of trusting: for every
+partition count up to 24 and every replica count up to it, the test asserts each partition
+is claimed by *exactly* one ordinal - not "at least one" (a gap silently drops a symbol's
+flow) and not "at most one" (an overlap is the split-brain above). Four injected defects -
+dropping the remainder offset, never handing out remainder partitions, making ordinals 0
+and 1 both claim partition 0, and an off-by-one that double-claims - are each caught by it.
+
+### Books are per symbol, not per partition
+
+A partition can carry more than one symbol, because symbols map onto partitions by hashing
+the key. With four symbols and four partitions that happens to come out 1:1 here (verified:
+5,000 orders on each of the four partitions), but nothing guarantees it - `AAPL` and `GOOG`
+both hash to partition 0, which would have left partition 1 idle and one pod holding two
+books. The service therefore keeps an `Engine` per symbol, created on first sight, rather
+than one per partition. Correctness never depends on the hash landing evenly; only the
+tidiness of the demo does.
+
+### End-to-end verification
+
+Trusting the system's own output would prove nothing, so the check compares it against the
+already-proven single-process engine. A fixed-seed stream is recorded per symbol against a
+local `Engine`, capturing both the orders and the trades that engine produced. The same
+orders are then published to Kafka, and the trades the cluster publishes are diffed against
+the local ones, per symbol, in order.
+
+Run against a live `kind` cluster - one Kafka broker and four engine pods, all in-cluster:
+
+```
+published 20000 orders, expecting 11606 trades
+received 11606 trades (0 malformed)
+
+symbol     expected   observed   result
+AAPL           3034       3034   MATCH
+MSFT           2886       2886   MATCH
+AMZN           3120       3120   MATCH
+META           2566       2566   MATCH
+
+PASS: cluster trades match in-process ground truth
+```
+
+Exit code 0, four pods ready, zero restarts. Trades landed 3,034 / 2,566 / 3,120 / 2,886
+across the four `matchbox.trades` partitions - 11,606, matching the ground truth exactly.
+
+### Limitations
+
+These are real and deliberate, not oversights:
+
+- **No elastic scaling.** Replica count must equal partition count. Changing it without
+  reassigning partitions leaves partitions unowned. This is the price of the static
+  ownership guarantee above, and it is the right trade for state that cannot be split.
+- **Book state is lost on pod restart.** The book lives in memory only. A restarted pod
+  resumes from its committed offset with an empty book, so previously resting orders are
+  gone. A real venue would rebuild by replaying the partition from the start or restoring a
+  snapshot plus a tail of the log; neither is implemented here.
+- **At-least-once trade publishing.** Offsets are committed only after outstanding trades
+  are flushed and acknowledged, so a crash re-processes rather than drops. The cost is that
+  a replay can publish a trade twice - there is no idempotent producer or transactional
+  write, and no deduplication downstream.
+- **A single Kafka broker.** Replication factor 1, no fault tolerance. Losing the broker
+  loses the log.
+- **The broker's advertised listener is hard-coded** to the single pod's DNS name. A
+  multi-broker StatefulSet would have to derive it per pod.
+
+
 ## Layout
 
 ```
@@ -269,6 +366,8 @@ src/generator/   noise and informed trader flow, market simulator, shared id sou
 tests/           correctness and randomised stress tests, shared independent book model
 bench/           latency/throughput harness
 sim/             concurrent multi-symbol simulation and market-quality stats
+service/         Kafka-facing engine service, wire format, Dockerfile, compose stack
+infra/k8s/       Kafka + engine manifests for a local kind cluster
 ```
 
 ## License

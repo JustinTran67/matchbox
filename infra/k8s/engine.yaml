@@ -1,0 +1,86 @@
+# A StatefulSet, not a Deployment, because ordinals are the whole ownership mechanism: each
+# pod derives which partitions it owns from the integer on the end of its own name. A
+# Deployment's random pod suffixes carry no such identity.
+#
+# replicas must equal the orders topic's partition count. Scaling this number without
+# reassigning partitions would leave partitions unowned (orders silently unmatched) or, if
+# ownership were dynamic instead, doubly owned. That is the trade this design makes: no
+# elastic scaling, in exchange for never having two engines on one book.
+apiVersion: v1
+kind: Service
+metadata:
+  name: matchbox-engine
+  labels:
+    app: matchbox-engine
+spec:
+  clusterIP: None
+  selector:
+    app: matchbox-engine
+  ports:
+    - name: health
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: matchbox-engine
+spec:
+  serviceName: matchbox-engine
+  replicas: 4
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: matchbox-engine
+  template:
+    metadata:
+      labels:
+        app: matchbox-engine
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: engine
+          image: matchbox-engine:dev
+          # The image is side-loaded into kind rather than pulled from a registry.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: health
+          env:
+            # The downward API is what gives the process its ordinal, and therefore its
+            # partitions. Without it the pod refuses to start rather than guessing.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KAFKA_BROKERS
+              value: "kafka-0.kafka.default.svc.cluster.local:9092"
+            - name: REPLICA_COUNT
+              value: "4"
+            - name: PARTITION_COUNT
+              value: "4"
+            - name: HEALTH_PORT
+              value: "8080"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 6
+          # Sized for a laptop-scale kind cluster running four of these plus a broker, not
+          # copied from a production profile.
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
